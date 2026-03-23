@@ -14,17 +14,21 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 MODEL = "claude-haiku-4-5-20251001"
 
+MAX_CAPTION_LENGTH = 500
+
 SYSTEM_PROMPT = """Kamu copywriter konten Shopee untuk akun affiliate racunjajan.online.
 Tugasmu menulis caption yang jujur, engaging, dan tidak melebih-lebihkan.
 
 ATURAN KETAT:
+- TOTAL caption WAJIB di bawah 500 karakter (termasuk link, hashtag, emoji)
 - Hanya gunakan klaim yang didukung oleh deskripsi produk seller
 - Jika adlib tidak relevan dengan produk, jangan gunakan
 - Jangan tambahkan manfaat yang tidak disebutkan seller
 - Kalau deskripsi produk minim, fokus ke harga dan spesifikasi saja
 - Tulis dalam Bahasa Indonesia yang casual dan relatable
-- Gunakan emoji secukupnya
-- Format: hook (1 baris) + body (2-3 baris) + CTA + hashtags"""
+- Gunakan emoji secukupnya (maks 3)
+- Hashtag maks 3-4 saja, pendek
+- Format: hook (1 baris) + body (1-2 baris) + CTA + hashtags + link"""
 
 
 def _build_user_prompt(
@@ -94,5 +98,18 @@ async def generate_caption(
     )
 
     caption = message.content[0].text.strip()
+
+    if len(caption) > MAX_CAPTION_LENGTH:
+        logger.warning(
+            f"Caption too long ({len(caption)} chars), truncating to {MAX_CAPTION_LENGTH}"
+        )
+        # Truncate at last newline before limit to keep structure clean
+        truncated = caption[:MAX_CAPTION_LENGTH]
+        last_newline = truncated.rfind("\n")
+        if last_newline > MAX_CAPTION_LENGTH * 0.6:
+            caption = truncated[:last_newline]
+        else:
+            caption = truncated
+
     logger.info(f"Caption generated ({len(caption)} chars)")
     return caption

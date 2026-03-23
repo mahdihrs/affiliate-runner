@@ -99,8 +99,10 @@ def collect_product_interactively() -> dict:
     description = prompt("Seller description (optional, press Enter to skip)", default="")
 
     print()
-    print("Which niche? Options:", ", ".join(NICHE_NAMES), "(or press Enter for all)")
-    niche_input = prompt("Niche", default="all").strip().lower()
+    print("Which niche?")
+    for i, n in enumerate(NICHE_NAMES, 1):
+        print(f"  {i}. {n}")
+    niche_input = prompt("Niche name (or 'all' for every niche)").strip().lower()
 
     return {
         "shop_id": shop_id,

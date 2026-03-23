@@ -48,51 +48,81 @@ def parse_shopee_url(url: str) -> tuple[str, str] | None:
     return None
 
 
-def prompt(label: str, default: str = "") -> str:
+def prompt(label: str, default: str = "", required: bool = False) -> str:
     suffix = f" [{default}]" if default else ""
-    val = input(f"{label}{suffix}: ").strip()
-    return val if val else default
+    while True:
+        val = input(f"{label}{suffix}: ").strip()
+        result = val if val else default
+        if required and not result:
+            print("  ⚠  This field is required, please enter a value.")
+            continue
+        return result
 
 
-def prompt_float(label: str, default: float = 0.0) -> float:
-    val = prompt(label, str(default))
-    try:
-        return float(val.replace(",", "").replace(".", "").lstrip("Rp "))
-    except ValueError:
-        return default
+def prompt_float(label: str, default: float | None = None) -> float:
+    default_str = str(int(default)) if default is not None else ""
+    while True:
+        val = prompt(label, default=default_str, required=(default is None))
+        cleaned = val.replace(".", "").replace(",", "").lstrip("Rp").strip()
+        try:
+            return float(cleaned)
+        except ValueError:
+            print(f"  ⚠  Invalid number '{val}', enter digits only (e.g. 85000).")
+
+
+def prompt_int(label: str, default: int | None = None) -> int:
+    default_str = str(default) if default is not None else ""
+    while True:
+        val = prompt(label, default=default_str, required=(default is None))
+        cleaned = val.replace(",", "").strip()
+        try:
+            return int(cleaned)
+        except ValueError:
+            print(f"  ⚠  Invalid number '{val}', enter digits only (e.g. 532).")
+
+
+def prompt_niche() -> str:
+    while True:
+        print()
+        print("Which niche?")
+        for i, n in enumerate(NICHE_NAMES, 1):
+            print(f"  {i}. {n}")
+        val = input("Niche name or number: ").strip().lower()
+        # Accept number shortcut
+        if val.isdigit() and 1 <= int(val) <= len(NICHE_NAMES):
+            return NICHE_NAMES[int(val) - 1]
+        if val in NICHE_NAMES:
+            return val
+        print(f"  ⚠  Invalid niche '{val}'. Choose from the list above.")
 
 
 def collect_product_interactively() -> dict:
-    """Prompt user for product details."""
+    """Prompt user for product details, retrying on bad input."""
     print()
     print("=== Add product to queue ===")
-    print("Open the product in Shopee, get the affiliate link from your dashboard.")
+    print("Open the product in Shopee Affiliate dashboard to get the short link.")
     print()
 
-    affiliate_url = prompt("Affiliate link (e.g. https://s.shopee.co.id/40c1Qit8WW)")
+    affiliate_url = prompt("Affiliate link (e.g. https://s.shopee.co.id/40c1Qit8WW)", required=True)
 
-    url = prompt("Shopee product URL (for extracting item ID)")
+    url = prompt("Shopee product URL (for item/shop ID)", required=True)
     parsed = parse_shopee_url(url)
     if parsed:
         shop_id, item_id = parsed
         print(f"  Parsed → shop_id={shop_id}  item_id={item_id}")
     else:
-        shop_id = prompt("  Shop ID")
-        item_id = prompt("  Item ID")
+        print("  ⚠  Could not parse IDs from URL.")
+        shop_id = prompt("  Shop ID", required=True)
+        item_id = prompt("  Item ID", required=True)
 
-    name = prompt("Product name")
-    price = prompt_float("Price (Rp, current/discounted)")
-    original_price = prompt_float("Original price (Rp, before discount)", default=price)
-    image_url = prompt("Image URL (right-click product image → Copy image address)")
-    rating = float(prompt("Rating", default="4.8"))
-    sold_count = int(prompt("Sold count", default="100").replace(",", ""))
+    name        = prompt("Product name", required=True)
+    price       = prompt_float("Price (Rp, discounted)")
+    orig_price  = prompt_float("Original price (Rp, before discount)", default=price)
+    image_url   = prompt("Image URL (right-click image → Copy image address)", required=True)
+    rating      = prompt_float("Rating (e.g. 4.8)", default=4.8)
+    sold_count  = prompt_int("Sold count (e.g. 532)", default=100)
     description = prompt("Seller description (optional, Enter to skip)", default="")
-
-    print()
-    print("Which niche?")
-    for i, n in enumerate(NICHE_NAMES, 1):
-        print(f"  {i}. {n}")
-    niche_input = prompt("Niche name").strip().lower()
+    niche       = prompt_niche()
 
     return {
         "affiliate_url": affiliate_url,
@@ -100,12 +130,12 @@ def collect_product_interactively() -> dict:
         "item_id": item_id,
         "name": name,
         "price": price,
-        "original_price": original_price,
+        "original_price": orig_price,
         "image_url": image_url,
         "rating": rating,
         "sold_count": sold_count,
         "description": description,
-        "niche": niche_input,
+        "niche": niche,
     }
 
 

@@ -14,12 +14,14 @@ logger = logging.getLogger(__name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
+# Service role key bypasses RLS for storage operations
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", SUPABASE_KEY)
 BUCKET_NAME = os.getenv("SUPABASE_BUCKET_NAME", "temp-images")
 
 
 def _get_storage():
-    """Get Supabase storage client."""
-    client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    """Get Supabase storage client using service role key to bypass RLS."""
+    client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     return client.storage
 
 

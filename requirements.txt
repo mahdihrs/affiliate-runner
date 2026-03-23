@@ -1,0 +1,8 @@
+playwright==1.49.1
+playwright-stealth==1.0.6
+anthropic==0.42.0
+supabase==2.11.0
+apscheduler==3.10.4
+Pillow==11.1.0
+httpx==0.28.1
+python-dotenv==1.0.1

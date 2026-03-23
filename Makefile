@@ -2,7 +2,7 @@ VENV := .venv
 PYTHON := $(VENV)/bin/python3
 PIP := $(VENV)/bin/pip
 
-.PHONY: install seed run test-pipeline test-caption test-fetch help
+.PHONY: install seed run test-pipeline test-caption test-fetch seed-queue help
 
 help:
 	@echo "Available commands:"
@@ -12,6 +12,10 @@ help:
 	@echo "  make test-pipeline  Run a single pipeline slot manually"
 	@echo "  make test-fetch     Test Playwright fetcher for a niche"
 	@echo "  make test-caption   Test Claude caption generator"
+	@echo "  make seed-queue     Manually add a product to post_queue (interactive)"
+
+seed-queue:
+	PYTHONPATH=. $(PYTHON) scripts/seed_queue.py
 
 install:
 	python3.11 -m venv $(VENV)

@@ -54,6 +54,12 @@ def get_niche_by_name(name: str) -> dict[str, Any] | None:
     return result.data[0] if result.data else None
 
 
+def get_niche_by_id(niche_id: str) -> dict[str, Any] | None:
+    """Fetch a single niche by ID."""
+    result = get_client().table("niches").select("*").eq("id", niche_id).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
 # --- Adlibs ---
 
 def get_adlibs(niche_id: str) -> list[dict[str, Any]]:
@@ -111,19 +117,22 @@ def insert_to_queue(entries: list[dict[str, Any]]) -> None:
         get_client().table("post_queue").insert(entries).execute()
 
 
-def get_pending_from_queue(account_id: str, niche_id: str) -> list[dict[str, Any]]:
-    """Fetch pending queue entries for an account+niche, ordered by score DESC."""
-    result = (
+def get_pending_from_queue(account_id: str, niche_id: str | None = None) -> list[dict[str, Any]]:
+    """Fetch pending queue entries for an account, optionally filtered by niche.
+
+    When niche_id is None, returns pending items across all niches.
+    """
+    query = (
         get_client()
         .table("post_queue")
         .select("*")
         .eq("account_id", account_id)
-        .eq("niche_id", niche_id)
         .eq("status", "pending")
         .order("score", desc=True)
-        .execute()
     )
-    return result.data
+    if niche_id is not None:
+        query = query.eq("niche_id", niche_id)
+    return query.execute().data
 
 
 def get_failed_from_queue(account_id: str) -> list[dict[str, Any]]:

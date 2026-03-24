@@ -101,11 +101,12 @@ async def process_and_post(
     niche_id = niche["id"]
     token = account["threads_token"]
 
-    # Check for existing pending items first (e.g. from manual seed)
-    pending = db.get_pending_from_queue(account_id, niche_id)
+    # Check for existing pending items (e.g. from manual seed)
+    # First try any niche, then niche-specific
+    pending = db.get_pending_from_queue(account_id)
 
     if not pending:
-        # No pending items — discover and queue new ones
+        # No pending items at all — discover and queue new ones
         queued = await discover_and_queue(account, niche)
         if not queued:
             return False
@@ -116,9 +117,12 @@ async def process_and_post(
     entry = pending[0]
     product_data = entry["product_data"]
     affiliate_url = entry["affiliate_url"]
+    # Use the entry's actual niche_id for adlibs (may differ from slot niche)
+    entry_niche_id = entry["niche_id"]
 
     # Get adlibs for caption generation
-    adlibs = db.get_adlibs(niche_id)
+    niche = db.get_niche_by_id(entry_niche_id) or niche
+    adlibs = db.get_adlibs(entry_niche_id)
 
     try:
         # Generate caption
@@ -144,7 +148,7 @@ async def process_and_post(
         # Log success
         db.insert_post_log({
             "account_id": account_id,
-            "niche_id": niche_id,
+            "niche_id": entry_niche_id,
             "threads_post_id": post_id,
             "affiliate_url": affiliate_url,
             "status": "success",
@@ -159,7 +163,7 @@ async def process_and_post(
         db.update_queue_status(entry["id"], "failed")
         db.insert_post_log({
             "account_id": account_id,
-            "niche_id": niche_id,
+            "niche_id": entry_niche_id,
             "threads_post_id": None,
             "affiliate_url": affiliate_url,
             "status": "failed",

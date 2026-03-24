@@ -101,15 +101,17 @@ async def process_and_post(
     niche_id = niche["id"]
     token = account["threads_token"]
 
-    # Discover and queue
-    queued = await discover_and_queue(account, niche)
-    if not queued:
-        return False
-
-    # Get the top pending item
+    # Check for existing pending items first (e.g. from manual seed)
     pending = db.get_pending_from_queue(account_id, niche_id)
+
     if not pending:
-        return False
+        # No pending items — discover and queue new ones
+        queued = await discover_and_queue(account, niche)
+        if not queued:
+            return False
+        pending = db.get_pending_from_queue(account_id, niche_id)
+        if not pending:
+            return False
 
     entry = pending[0]
     product_data = entry["product_data"]

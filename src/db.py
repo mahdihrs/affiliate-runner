@@ -20,7 +20,7 @@ def get_client() -> Client:
     global _client
     if _client is None:
         url = os.getenv("SUPABASE_URL", "")
-        key = os.getenv("SUPABASE_KEY", "")
+        key = os.getenv("SUPABASE_SERVICE_KEY", os.getenv("SUPABASE_KEY", ""))
         _client = create_client(url, key)
     return _client
 

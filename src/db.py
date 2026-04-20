@@ -209,3 +209,62 @@ def cleanup_old_queue(retention_days: int = 7) -> int:
         .execute()
     )
     return len(result.data)
+
+
+# --- Bot-submitted queue entries ---
+
+def insert_bot_queue_entries(
+    product_data: dict[str, Any],
+    affiliate_url: str,
+    niche_id: str,
+    score: float = 50.0,
+) -> int:
+    """Insert a bot-submitted product into post_queue for every active account.
+
+    `product_data` is the JSONB shape — must already include `image_storage_path`
+    so the success hook can delete the bot-uploaded image after posting.
+
+    Returns the number of rows inserted.
+    """
+    accounts = get_active_accounts()
+    if not accounts:
+        return 0
+    item_id = product_data.get("item_id") or f"manual_{datetime.now(timezone.utc).timestamp():.0f}"
+    product_data.setdefault("item_id", item_id)
+    rows = [
+        {
+            "account_id": account["id"],
+            "niche_id": niche_id,
+            "shopee_item_id": item_id,
+            "product_data": product_data,
+            "affiliate_url": affiliate_url,
+            "score": score,
+            "status": "pending",
+            "fetch_strategy": "keyword",
+        }
+        for account in accounts
+    ]
+    get_client().table("post_queue").insert(rows).execute()
+    return len(rows)
+
+
+def get_active_bot_image_paths() -> set[str]:
+    """Return all `image_storage_path` values referenced by non-terminal queue rows.
+
+    Used by orphan cleanup — any object in the bot-uploads bucket whose path is
+    NOT in this set (and is older than the retention cutoff) can be deleted.
+    """
+    result = (
+        get_client()
+        .table("post_queue")
+        .select("product_data")
+        .in_("status", ["pending", "failed"])
+        .execute()
+    )
+    paths = set()
+    for row in result.data:
+        pd = row.get("product_data") or {}
+        p = pd.get("image_storage_path")
+        if p:
+            paths.add(p)
+    return paths

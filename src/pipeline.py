@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Any
 
-from src import db
+from src import db, bot_storage
 from src.fetcher import fetch_products
 from src.filter import filter_and_score, handle_low_inventory
 from src.affiliate import make_affiliate_link
@@ -154,6 +154,14 @@ async def process_and_post(
             "status": "success",
             "retry_count": 0,
         })
+
+        # Bot-submitted products: drop the persisted image from storage.
+        storage_path = product_data.get("image_storage_path")
+        if storage_path:
+            try:
+                bot_storage.delete_bot_image(storage_path)
+            except Exception as cleanup_err:
+                logger.warning(f"Bot image cleanup failed: {cleanup_err}")
 
         await notify_success(product_data, post_id)
         return True

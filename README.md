@@ -22,21 +22,25 @@ Fully automated Shopee affiliate content pipeline. Discovers products via Playwr
 
 ```
 ├── src/
-│   ├── fetcher.py      # Playwright product discovery (4-strategy fallback)
-│   ├── filter.py       # 2-query dedup + quality filter
-│   ├── affiliate.py    # Affiliate link constructor (an_redir format)
-│   ├── caption.py      # Claude caption generator with adlib validation
-│   ├── images.py       # Ephemeral image handler (download → bucket → delete)
-│   ├── poster.py       # Threads API poster (single + carousel)
-│   ├── pipeline.py     # Main orchestration (fetch → filter → queue → post)
-│   ├── scheduler.py    # APScheduler — 4 jobs wired together
-│   ├── db.py           # Supabase client + all query functions
-│   └── notify.py       # Telegram notifications
+│   ├── fetcher.py        # Playwright product discovery (4-strategy fallback)
+│   ├── filter.py         # 2-query dedup + quality filter
+│   ├── affiliate.py      # Affiliate link constructor (an_redir format)
+│   ├── caption.py        # Claude caption generator with adlib validation
+│   ├── images.py         # Ephemeral post-time image handler (temp-images bucket)
+│   ├── bot_storage.py    # Persistent bot-uploads bucket helpers
+│   ├── gemini_vision.py  # Gemini screenshot → product JSON + crop bbox
+│   ├── poster.py         # Threads API poster (single + carousel)
+│   ├── pipeline.py       # Main orchestration (fetch → filter → queue → post)
+│   ├── scheduler.py      # APScheduler — 4 jobs wired together
+│   ├── db.py             # Supabase client + all query functions
+│   └── notify.py         # Telegram notifications
 ├── scripts/
-│   └── seed.py         # One-time seed for niches + adlibs
+│   ├── seed.py           # One-time seed for niches + adlibs
+│   └── seed_queue.py     # Manual CLI product seeder
 ├── sql/
-│   └── schema.sql      # Full Supabase schema (7 tables)
-├── main.py             # Entry point
+│   └── schema.sql        # Full Supabase schema (7 tables)
+├── main.py               # Scheduler entry point
+├── admin_bot.py          # Telegram admin bot entry point
 ├── Dockerfile
 ├── requirements.txt
 └── .env.example
@@ -64,12 +68,15 @@ Required variables:
 
 | Variable | Description |
 |---|---|
-| `ANTHROPIC_API_KEY` | Claude API key |
+| `ANTHROPIC_API_KEY` | Claude API key (captions) |
+| `GEMINI_API_KEY` | Gemini API key (admin bot vision extraction) |
 | `SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_KEY` | Supabase service role key |
-| `SUPABASE_BUCKET_NAME` | Storage bucket name (default: `temp-images`) |
-| `TELEGRAM_BOT_TOKEN` | Telegram bot token for logging |
-| `TELEGRAM_CHAT_ID` | Telegram chat ID |
+| `SUPABASE_BUCKET_NAME` | Ephemeral post-time bucket (default: `temp-images`) |
+| `SUPABASE_BOT_UPLOADS_BUCKET` | Persistent bucket for bot-submitted images (default: `bot-uploads`) |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token (shared by notifier + admin bot) |
+| `TELEGRAM_CHAT_ID` | Telegram chat ID for outbound notifications |
+| `TELEGRAM_ALLOWED_USER_IDS` | Comma-separated user IDs allowed to submit products via the admin bot |
 | `POST_TIMES` | Comma-separated WIB times (default: `07:00,10:00,12:00,15:00,18:00,21:00`) |
 
 `threads_token` and `affiliate_id` are stored per-account in the `accounts` table — not env vars.
@@ -107,11 +114,41 @@ python main.py
 
 ## Deploy to Railway
 
-1. Connect the GitHub repo to a new Railway service
-2. Set all environment variables in Railway UI
-3. Railway will build the Dockerfile and start `python main.py`
+Deploy as **two services from the same repo** — they share the Dockerfile and env vars but run different entry points.
+
+**Service 1: scheduler** (existing)
+- Start command: `python main.py`
+- Needs: everything in `.env.example`
+
+**Service 2: admin bot**
+- Start command: `python admin_bot.py`
+- Needs (minimum): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, `GEMINI_API_KEY`, all `SUPABASE_*` vars
+- Before setting `TELEGRAM_ALLOWED_USER_IDS`: deploy once with it empty, send `/whoami` to the bot, copy your user_id, then set the env var.
 
 The Dockerfile uses `mcr.microsoft.com/playwright/python` which includes Chromium — no additional browser install needed in production.
+
+### Supabase Storage setup
+
+Create two public buckets:
+- `temp-images` — ephemeral, used by the scheduler per post
+- `bot-uploads` — persistent, used by the admin bot until the product is posted
+
+Make both **public** (so Threads can fetch images for the post container).
+
+## Admin bot (manual product submission)
+
+Run via `python admin_bot.py` (or the second Railway service).
+
+1. Open your Telegram bot and send `/start` to see the command menu.
+2. Run `/submit` — the bot asks for a screenshot.
+3. Send a screenshot of a Shopee product. Gemini extracts fields and the bot shows you what it parsed. If anything mandatory is missing (`name`, `price`, `description`), reply with `field: value` — one per line.
+4. Paste the affiliate link when asked.
+5. Pick a niche via the inline keyboard.
+6. Confirm → the product is inserted into `post_queue` for every active account and the scheduler picks it up on the next slot.
+
+Use `/cancel` at any time to abort the current submission.
+
+The cropped screenshot is uploaded to the `bot-uploads` bucket. It's deleted automatically after a successful post, or by the nightly cleanup job if the entry is abandoned.
 
 ## Scheduler jobs
 

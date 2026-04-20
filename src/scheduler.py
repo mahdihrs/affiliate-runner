@@ -3,14 +3,14 @@
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
 
-from src import db
+from src import db, bot_storage
 from src.pipeline import process_and_post
 from src.poster import ThreadsAPIError
 from src.notify import (
@@ -30,6 +30,7 @@ RETRY_DELAY_MINUTES = int(os.getenv("RETRY_DELAY_MINUTES", "15"))
 VERIFICATION_TIME = os.getenv("VERIFICATION_TIME", "23:00")
 CLEANUP_TIME = os.getenv("CLEANUP_TIME", "03:00")
 QUEUE_RETENTION_DAYS = int(os.getenv("QUEUE_RETENTION_DAYS", "7"))
+BOT_IMAGE_ORPHAN_HOURS = int(os.getenv("BOT_IMAGE_ORPHAN_HOURS", "24"))
 
 # WIB = UTC+7
 WIB_OFFSET = 7
@@ -140,6 +141,14 @@ async def _retry_job() -> None:
                     "retry_count": entry.get("retry_count", 0) + 1,
                 })
 
+                # Bot-submitted products: drop the persisted image from storage.
+                storage_path = product_data.get("image_storage_path")
+                if storage_path:
+                    try:
+                        bot_storage.delete_bot_image(storage_path)
+                    except Exception as cleanup_err:
+                        logger.warning(f"Bot image cleanup failed: {cleanup_err}")
+
             except Exception as e:
                 logger.error(f"Retry failed for {product_data.get('name', '')}: {e}")
                 # Keep status as failed — will show up in daily verification
@@ -189,14 +198,48 @@ async def _daily_verification() -> None:
 
 
 async def _cleanup_job() -> None:
-    """Delete expired seen_products and old post_queue entries."""
+    """Delete expired seen_products, old post_queue entries, and orphan bot images."""
     logger.info("Running cleanup_job")
 
     seen_deleted = db.cleanup_expired_seen()
     queue_deleted = db.cleanup_old_queue(QUEUE_RETENTION_DAYS)
+    orphan_images = _cleanup_orphan_bot_images()
 
-    logger.info(f"Cleanup: {seen_deleted} seen, {queue_deleted} queue entries deleted")
+    logger.info(
+        f"Cleanup: {seen_deleted} seen, {queue_deleted} queue entries, "
+        f"{orphan_images} orphan bot images deleted"
+    )
     await notify_cleanup(seen_deleted, queue_deleted)
+
+
+def _cleanup_orphan_bot_images() -> int:
+    """Delete bot-uploads objects not referenced by any non-terminal queue row
+    and older than BOT_IMAGE_ORPHAN_HOURS. Returns count deleted.
+    """
+    try:
+        in_use = db.get_active_bot_image_paths()
+        objects = bot_storage.list_bot_images()
+    except Exception as e:
+        logger.warning(f"Orphan image scan failed: {e}")
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=BOT_IMAGE_ORPHAN_HOURS)
+    deleted = 0
+    for obj in objects:
+        name = obj.get("name", "")
+        if not name or name in in_use:
+            continue
+        created_at = obj.get("created_at")
+        if created_at:
+            try:
+                created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                if created_dt > cutoff:
+                    continue
+            except ValueError:
+                pass
+        bot_storage.delete_bot_image(name)
+        deleted += 1
+    return deleted
 
 
 def start_scheduler() -> AsyncIOScheduler:

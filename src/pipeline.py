@@ -106,13 +106,8 @@ async def process_and_post(
     pending = db.get_pending_from_queue(account_id)
 
     if not pending:
-        # No pending items at all — discover and queue new ones
-        queued = await discover_and_queue(account, niche)
-        if not queued:
-            return False
-        pending = db.get_pending_from_queue(account_id, niche_id)
-        if not pending:
-            return False
+        logger.info("No pending items in queue — skipping (manual submission only)")
+        return False
 
     entry = pending[0]
     product_data = entry["product_data"]

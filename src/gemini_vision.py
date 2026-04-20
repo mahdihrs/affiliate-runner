@@ -49,7 +49,7 @@ Rules:
 - `price` is the CURRENT discounted price. `original_price` is the crossed-out price (or equal to price if no discount).
 - `discount_pct` is an integer 0-100.
 - `sold_count` is the total count (convert "1,2rb terjual" -> 1200, "5rb+" -> 5000).
-- `description` is the seller's product description text if visible. Write a SHORT (1-2 sentence) factual description based only on what you can read in the screenshot. Do NOT invent features.
+- `description` is the seller's product description text if visible. Write a SHORT (1-2 sentence) factual description in Bahasa Indonesia based only on what you can read in the screenshot. Do NOT invent features.
 - `product_image_bbox` is the bounding box of the main product photo in the screenshot, as [ymin, xmin, ymax, xmax] normalized to 0-1000. If no clean product photo is visible, return null.
 - If ANY field is not clearly readable in the screenshot, return null for that field. DO NOT GUESS.
 - Return ONLY the JSON object, no markdown fences, no prose."""

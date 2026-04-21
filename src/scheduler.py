@@ -6,6 +6,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from apscheduler.events import EVENT_JOB_ERROR, JobExecutionEvent
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from dotenv import load_dotenv
@@ -59,11 +60,33 @@ def _parse_post_times() -> list[tuple[int, int]]:
     return times
 
 
+def _on_job_error(event: JobExecutionEvent) -> None:
+    """APScheduler listener — fires when any job raises an unhandled exception."""
+    job_id = event.job_id
+    exc = event.exception
+    tb = event.traceback or ""
+    logger.error(f"Scheduled job '{job_id}' crashed: {exc}\n{tb}")
+    # Fire-and-forget Telegram alert from inside the running event loop.
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(
+            notify_alert(f"Scheduled job <code>{job_id}</code> crashed:\n<code>{exc}</code>")
+        )
+    except RuntimeError:
+        pass  # No event loop — nothing we can do here.
+
+
 async def _main_pipeline_slot(slot_index: int) -> None:
     """Run the main pipeline for a specific slot."""
     logger.info(f"Running main_pipeline slot {slot_index + 1}")
 
-    accounts = db.get_active_accounts()
+    try:
+        accounts = db.get_active_accounts()
+    except Exception as e:
+        logger.error(f"DB error fetching accounts: {e}")
+        await notify_alert(f"Slot {slot_index + 1} — DB error fetching accounts: {e}")
+        return
+
     if not accounts:
         logger.warning("No active accounts found")
         return
@@ -71,21 +94,25 @@ async def _main_pipeline_slot(slot_index: int) -> None:
     for account in accounts:
         niche_slug = NICHE_ROTATION[slot_index] if slot_index < len(NICHE_ROTATION) else None
 
-        if niche_slug is None:
-            # Slot 6: highest scored across all niches — pick from queue
-            niches = db.get_account_niches(account["id"])
-            if niches:
-                # Pick niche with highest scored pending item
-                best_niche = niches[0].get("niches", niches[0])
-                niche = best_niche
+        try:
+            if niche_slug is None:
+                # Slot 6: highest scored across all niches — pick from queue
+                niches = db.get_account_niches(account["id"])
+                if niches:
+                    best_niche = niches[0].get("niches", niches[0])
+                    niche = best_niche
+                else:
+                    logger.warning(f"No niches for account {account['name']}")
+                    continue
             else:
-                logger.warning(f"No niches for account {account['name']}")
-                continue
-        else:
-            niche = db.get_niche_by_name(niche_slug)
-            if not niche:
-                logger.warning(f"Niche {niche_slug} not found")
-                continue
+                niche = db.get_niche_by_name(niche_slug)
+                if not niche:
+                    logger.warning(f"Niche {niche_slug} not found")
+                    continue
+        except Exception as e:
+            logger.error(f"DB error resolving niche for slot {slot_index + 1}: {e}")
+            await notify_alert(f"Slot {slot_index + 1} — DB error resolving niche: {e}")
+            continue
 
         try:
             await process_and_post(account, niche)
@@ -98,7 +125,13 @@ async def _retry_job() -> None:
     """Retry failed post_queue entries from the last slot."""
     logger.info("Running retry_job")
 
-    accounts = db.get_active_accounts()
+    try:
+        accounts = db.get_active_accounts()
+    except Exception as e:
+        logger.error(f"DB error in retry_job: {e}")
+        await notify_alert(f"Retry job — DB error fetching accounts: {e}")
+        return
+
     for account in accounts:
         failed = db.get_failed_from_queue(account["id"])
         if not failed:
@@ -168,7 +201,13 @@ async def _daily_verification() -> None:
     """Count today's posts per account. Fill gap if below target. Send summary."""
     logger.info("Running daily_verification")
 
-    accounts = db.get_active_accounts()
+    try:
+        accounts = db.get_active_accounts()
+    except Exception as e:
+        logger.error(f"DB error in daily_verification: {e}")
+        await notify_alert(f"Daily verification — DB error fetching accounts: {e}")
+        return
+
     for account in accounts:
         target = account.get("post_per_day", 6)
         actual = db.count_today_posts(account["id"])
@@ -245,6 +284,7 @@ def _cleanup_orphan_bot_images() -> int:
 def start_scheduler() -> AsyncIOScheduler:
     """Configure and start the APScheduler with all 4 jobs."""
     scheduler = AsyncIOScheduler()
+    scheduler.add_listener(_on_job_error, EVENT_JOB_ERROR)
 
     # Job 1: main_pipeline — 6x/day
     post_times = _parse_post_times()

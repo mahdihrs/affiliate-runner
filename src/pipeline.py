@@ -107,6 +107,10 @@ async def process_and_post(
 
     if not pending:
         logger.info("No pending items in queue — skipping (manual submission only)")
+        await notify_alert(
+            f"Slot skipped — no pending items in queue for <b>{account.get('name', 'unknown')}</b>.\n"
+            f"Submit products via the Telegram bot."
+        )
         return False
 
     entry = pending[0]

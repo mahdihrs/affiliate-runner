@@ -1,7 +1,7 @@
 """Entry point for the racunjajan.online affiliate pipeline.
 
-Runs both the APScheduler (post pipeline) and the Telegram admin bot
-in a single asyncio event loop so only one Railway service is needed.
+Runs the APScheduler (post pipeline) and Telegram admin bot alongside
+a minimal Flask HTTP server for health checks (Render requirement).
 """
 
 import asyncio
@@ -10,9 +10,11 @@ import signal
 import sys
 import os
 import traceback
+import threading
 
 from dotenv import load_dotenv
 from telegram import Update
+from flask import Flask, jsonify
 
 load_dotenv()
 
@@ -47,11 +49,33 @@ def _validate_env() -> None:
         )
 
 
+def _start_health_server() -> None:
+    """Start a minimal Flask HTTP server for Render health checks."""
+    app = Flask(__name__)
+
+    @app.route("/", methods=["GET"])
+    def health():
+        return jsonify({"status": "ok", "service": "racunjajan-pipeline"}), 200
+
+    @app.route("/health", methods=["GET"])
+    def health_check():
+        return jsonify({"status": "healthy"}), 200
+
+    port = int(os.getenv("PORT", "10000"))
+    logger.info(f"Starting Flask health server on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
+
 async def main() -> None:
     """Initialize and start the scheduler + admin bot."""
     from src.notify import notify_alert
 
     logger.info("Starting racunjajan.online pipeline")
+
+    # Step 0: Start Flask health server in background thread.
+    health_thread = threading.Thread(target=_start_health_server, daemon=True)
+    health_thread.start()
+    logger.info("Health check server thread started")
 
     # Step 1: Validate env vars before doing anything else.
     try:

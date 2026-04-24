@@ -17,9 +17,8 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_MODEL_VISION = os.getenv("DEEPSEEK_MODEL_VISION", "deepseek-vision")
 DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+DEEPSEEK_MODEL_VISION = os.getenv("DEEPSEEK_MODEL_VISION", "deepseek-vision")
 
 _configured = False
 
@@ -27,8 +26,14 @@ _configured = False
 def _configure() -> None:
     global _configured
     if not _configured:
-        if not DEEPSEEK_API_KEY:
-            raise RuntimeError("DEEPSEEK_API_KEY is not set")
+        # Load API key fresh at runtime (not at module import time)
+        # This ensures Render's env vars are available
+        deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+        if not deepseek_api_key:
+            raise RuntimeError(
+                "DEEPSEEK_API_KEY is not set. "
+                "Set it as an environment variable in Render and redeploy."
+            )
         _configured = True
 
 
@@ -82,12 +87,20 @@ def extract_product(image_bytes: bytes) -> dict[str, Any]:
     """
     _configure()
     
+    # Get API key fresh at runtime
+    deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    if not deepseek_api_key:
+        raise RuntimeError(
+            "DEEPSEEK_API_KEY is not set. "
+            "Set it as an environment variable in Render and redeploy."
+        )
+    
     # Encode image to base64
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     
     # Prepare request for DeepSeek vision API (OpenAI-compatible format)
     headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Authorization": f"Bearer {deepseek_api_key}",
         "Content-Type": "application/json",
     }
     

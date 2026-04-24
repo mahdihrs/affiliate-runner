@@ -1,5 +1,6 @@
 """Gemini vision — screenshot → product JSON + crop bbox."""
 
+import asyncio
 import io
 import json
 import logging
@@ -81,13 +82,21 @@ def extract_product(image_bytes: bytes) -> dict[str, Any]:
     _configure()
     model = genai.GenerativeModel(GEMINI_MODEL)
     image = Image.open(io.BytesIO(image_bytes))
-    response = model.generate_content(
-        [EXTRACTION_PROMPT, image],
-        generation_config={
-            "temperature": 0.1,
-            "response_mime_type": "application/json",
-        },
-    )
+    
+    # Add 30-second timeout to prevent hanging
+    try:
+        response = model.generate_content(
+            [EXTRACTION_PROMPT, image],
+            generation_config={
+                "temperature": 0.1,
+                "response_mime_type": "application/json",
+            },
+            request_options={"timeout": 30}
+        )
+    except asyncio.TimeoutError:
+        logger.error("Gemini API call timed out after 30 seconds")
+        raise TimeoutError("Gemini analysis took too long (>30s)")
+    
     text = response.text or ""
     data = _parse_json_from_text(text)
     # Normalize types

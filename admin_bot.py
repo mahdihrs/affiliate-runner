@@ -186,8 +186,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     image_bytes = bytes(await file.download_as_bytearray())
 
     # Gemini extraction — run in thread since the SDK is sync
+    # Add 35-second timeout (5s buffer above Gemini's 30s timeout)
     try:
-        extracted = await asyncio.to_thread(extract_product, image_bytes)
+        extracted = await asyncio.wait_for(
+            asyncio.to_thread(extract_product, image_bytes),
+            timeout=35
+        )
+    except asyncio.TimeoutError:
+        logger.error("Gemini extraction timed out")
+        await msg.edit_text("Analysis took too long. Try with a clearer screenshot or /cancel.")
+        return ConversationHandler.END
     except Exception as e:
         logger.exception("Gemini extraction failed")
         await msg.edit_text(f"Failed to analyze image: {e}\nSend another screenshot or /cancel.")

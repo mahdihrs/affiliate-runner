@@ -11,7 +11,9 @@ import sys
 import os
 import traceback
 import threading
+import time
 
+import httpx
 from dotenv import load_dotenv
 from telegram import Update
 from flask import Flask, jsonify
@@ -66,16 +68,45 @@ def _start_health_server() -> None:
     app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 
+def _wait_for_health_server(max_retries: int = 10, retry_delay: float = 0.5) -> bool:
+    """Poll the health endpoint until the server is ready.
+    
+    Returns True if server is ready, False if timeout.
+    """
+    port = int(os.getenv("PORT", "10000"))
+    health_url = f"http://localhost:{port}/health"
+    
+    for attempt in range(max_retries):
+        try:
+            response = httpx.get(health_url, timeout=2)
+            if response.status_code == 200:
+                logger.info(f"Flask health server is ready (attempt {attempt + 1})")
+                return True
+        except Exception:
+            pass
+        
+        if attempt < max_retries - 1:
+            time.sleep(retry_delay)
+    
+    logger.warning(f"Flask health server did not respond after {max_retries} attempts")
+    return False
+
+
 async def main() -> None:
     """Initialize and start the scheduler + admin bot."""
     from src.notify import notify_alert
 
     logger.info("Starting racunjajan.online pipeline")
 
-    # Step 0: Start Flask health server in background thread.
+    # Step 0: Start Flask health server in background thread and wait for it to be ready.
     health_thread = threading.Thread(target=_start_health_server, daemon=True)
     health_thread.start()
-    logger.info("Health check server thread started")
+    logger.info("Health check server thread started, waiting for server to be ready...")
+    
+    if not _wait_for_health_server():
+        logger.warning("Health server may not be responding, but continuing anyway...")
+    else:
+        logger.info("✓ Flask server is ready and listening")
 
     # Step 1: Validate env vars before doing anything else.
     try:

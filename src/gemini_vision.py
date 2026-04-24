@@ -1,6 +1,7 @@
-"""Gemini vision — screenshot → product JSON + crop bbox."""
+"""DeepSeek vision — screenshot → product JSON + crop bbox."""
 
 import asyncio
+import base64
 import io
 import json
 import logging
@@ -8,7 +9,7 @@ import os
 import re
 from typing import Any
 
-import google.generativeai as genai
+import httpx
 from PIL import Image
 from dotenv import load_dotenv
 
@@ -16,8 +17,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL_VISION = os.getenv("DEEPSEEK_MODEL_VISION", "deepseek-vision")
+DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
 
 _configured = False
 
@@ -25,9 +27,8 @@ _configured = False
 def _configure() -> None:
     global _configured
     if not _configured:
-        if not GEMINI_API_KEY:
-            raise RuntimeError("GEMINI_API_KEY is not set")
-        genai.configure(api_key=GEMINI_API_KEY)
+        if not DEEPSEEK_API_KEY:
+            raise RuntimeError("DEEPSEEK_API_KEY is not set")
         _configured = True
 
 
@@ -72,7 +73,7 @@ def _parse_json_from_text(text: str) -> dict[str, Any]:
 
 
 def extract_product(image_bytes: bytes) -> dict[str, Any]:
-    """Call Gemini vision to extract product fields + bbox from a screenshot.
+    """Call DeepSeek vision to extract product fields + bbox from a screenshot.
 
     Returns a dict with keys:
       name, price, original_price, discount_pct, description, rating, sold_count,
@@ -80,24 +81,70 @@ def extract_product(image_bytes: bytes) -> dict[str, Any]:
     Missing values are None.
     """
     _configure()
-    model = genai.GenerativeModel(GEMINI_MODEL)
-    image = Image.open(io.BytesIO(image_bytes))
     
-    # Add 30-second timeout to prevent hanging
+    # Encode image to base64
+    image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+    
+    # Prepare request for DeepSeek vision API (OpenAI-compatible format)
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    
+    payload = {
+        "model": DEEPSEEK_MODEL_VISION,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": EXTRACTION_PROMPT
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_b64}"
+                        }
+                    }
+                ]
+            }
+        ],
+        "temperature": 0.1,
+    }
+    
+    # Make API call with 30-second timeout
     try:
-        response = model.generate_content(
-            [EXTRACTION_PROMPT, image],
-            generation_config={
-                "temperature": 0.1,
-                "response_mime_type": "application/json",
-            },
-            request_options={"timeout": 30}
-        )
-    except asyncio.TimeoutError:
-        logger.error("Gemini API call timed out after 30 seconds")
-        raise TimeoutError("Gemini analysis took too long (>30s)")
+        with httpx.Client(timeout=30) as client:
+            response = client.post(
+                f"{DEEPSEEK_API_BASE}/chat/completions",
+                json=payload,
+                headers=headers
+            )
+            response.raise_for_status()
+    except httpx.TimeoutException:
+        logger.error("DeepSeek API call timed out after 30 seconds")
+        raise TimeoutError("DeepSeek analysis took too long (>30s)")
+    except httpx.HTTPError as e:
+        logger.error(f"DeepSeek API error: {e}")
+        raise
     
-    text = response.text or ""
+    response_data = response.json()
+    
+    # Extract text from DeepSeek response (OpenAI-compatible format)
+    try:
+        if "choices" in response_data and len(response_data["choices"]) > 0:
+            text = response_data["choices"][0].get("message", {}).get("content", "")
+        else:
+            text = ""
+    except (KeyError, IndexError, TypeError):
+        logger.error(f"Unexpected DeepSeek response format: {response_data}")
+        raise ValueError("Invalid DeepSeek response format")
+    
+    if not text:
+        logger.error(f"DeepSeek returned empty response: {response_data}")
+        raise ValueError("DeepSeek returned no text content")
+    
     data = _parse_json_from_text(text)
     # Normalize types
     for num_field in ("price", "original_price", "discount_pct", "rating", "sold_count"):
@@ -110,7 +157,7 @@ def extract_product(image_bytes: bytes) -> dict[str, Any]:
             except (TypeError, ValueError):
                 data[num_field] = None
     logger.info(
-        "Gemini extracted: name=%s price=%s has_bbox=%s",
+        "DeepSeek extracted: name=%s price=%s has_bbox=%s",
         data.get("name"),
         data.get("price"),
         data.get("product_image_bbox") is not None,

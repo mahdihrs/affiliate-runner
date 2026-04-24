@@ -1,8 +1,7 @@
-"""Caption generator with provider switching (Claude or DeepSeek).
+"""DeepSeek Chat caption generator with adlib selection and self-validation."""
 
-Uses Claude Haiku by default. Set USE_DEEPSEEK_CAPTION=true to use DeepSeek Chat instead.
-"""
-
+import httpx
+import json
 import logging
 import os
 from typing import Any
@@ -13,19 +12,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Provider selection
-USE_DEEPSEEK = os.getenv("USE_DEEPSEEK_CAPTION", "false").lower() in ("true", "1", "yes")
-
-# Import the appropriate generator
-if USE_DEEPSEEK:
-    from src.deepseek_caption import generate_caption as _generate_caption_impl
-    logger.info("Caption provider: DeepSeek Chat")
-else:
-    import anthropic
-    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-    MODEL = "claude-haiku-4-5-20251001"
-    _generate_caption_impl = None  # Will use Claude implementation below
-    logger.info("Caption provider: Claude Haiku")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+DEEPSEEK_MODEL_CHAT = os.getenv("DEEPSEEK_MODEL_CHAT", "deepseek-chat")
 
 MAX_CAPTION_LENGTH = 500
 
@@ -87,26 +76,70 @@ Tugas:
 Link affiliate: {affiliate_url}"""
 
 
-def _generate_caption_claude(
+async def generate_caption(
     product: dict[str, Any],
     niche: dict[str, Any],
     adlibs: list[dict[str, Any]],
     affiliate_url: str,
 ) -> str:
-    """Generate caption using Claude Haiku (sync version)."""
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    """Generate a caption using DeepSeek Chat.
+
+    Returns the final caption string.
+    """
+    if not DEEPSEEK_API_KEY:
+        raise RuntimeError("DEEPSEEK_API_KEY is not set")
+
     user_prompt = _build_user_prompt(product, niche, adlibs, affiliate_url)
 
-    logger.info(f"Generating caption for: {product.get('name', 'unknown')} (Claude)")
+    logger.info(f"Generating caption for: {product.get('name', 'unknown')} (DeepSeek)")
 
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=500,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    caption = message.content[0].text.strip()
+    payload = {
+        "model": DEEPSEEK_MODEL_CHAT,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 500,
+    }
+
+    try:
+        with httpx.Client(timeout=30) as client:
+            response = client.post(
+                f"{DEEPSEEK_API_BASE}/chat/completions",
+                json=payload,
+                headers=headers
+            )
+            response.raise_for_status()
+    except httpx.TimeoutException:
+        logger.error("DeepSeek caption API call timed out after 30 seconds")
+        raise TimeoutError("DeepSeek caption generation took too long (>30s)")
+    except httpx.HTTPError as e:
+        logger.error(f"DeepSeek API error: {e}")
+        raise
+
+    response_data = response.json()
+
+    # Extract text from DeepSeek response (OpenAI-compatible format)
+    try:
+        if "choices" in response_data and len(response_data["choices"]) > 0:
+            caption = response_data["choices"][0].get("message", {}).get("content", "")
+        else:
+            caption = ""
+    except (KeyError, IndexError, TypeError):
+        logger.error(f"Unexpected DeepSeek response format: {response_data}")
+        raise ValueError("Invalid DeepSeek response format")
+
+    if not caption:
+        logger.error(f"DeepSeek returned empty response: {response_data}")
+        raise ValueError("DeepSeek returned no content")
+
+    caption = caption.strip()
 
     if len(caption) > MAX_CAPTION_LENGTH:
         logger.warning(
@@ -122,31 +155,3 @@ def _generate_caption_claude(
 
     logger.info(f"Caption generated ({len(caption)} chars)")
     return caption
-
-
-async def generate_caption(
-    product: dict[str, Any],
-    niche: dict[str, Any],
-    adlibs: list[dict[str, Any]],
-    affiliate_url: str,
-) -> str:
-    """Generate a caption using the configured provider (Claude or DeepSeek).
-
-    Returns the final caption string.
-    """
-    if USE_DEEPSEEK:
-        # DeepSeek implementation is async
-        return await _generate_caption_impl(product, niche, adlibs, affiliate_url)
-    else:
-        # Claude is sync, but we're in an async context
-        # Run it in a thread pool to avoid blocking
-        import asyncio
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            _generate_caption_claude,
-            product,
-            niche,
-            adlibs,
-            affiliate_url
-        )

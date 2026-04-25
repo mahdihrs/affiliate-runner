@@ -1,6 +1,5 @@
-"""DeepSeek vision — screenshot → product JSON + crop bbox."""
+"""Claude vision — screenshot → product JSON + crop bbox."""
 
-import asyncio
 import base64
 import io
 import json
@@ -9,7 +8,7 @@ import os
 import re
 from typing import Any
 
-import httpx
+import anthropic
 from PIL import Image
 from dotenv import load_dotenv
 
@@ -17,8 +16,8 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
-DEEPSEEK_MODEL_VISION = os.getenv("DEEPSEEK_MODEL_VISION", "deepseek-vision")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = os.getenv("CLAUDE_VISION_MODEL", "claude-3-5-sonnet-20241022")
 
 _configured = False
 
@@ -28,10 +27,10 @@ def _configure() -> None:
     if not _configured:
         # Load API key fresh at runtime (not at module import time)
         # This ensures Render's env vars are available
-        deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-        if not deepseek_api_key:
+        api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
             raise RuntimeError(
-                "DEEPSEEK_API_KEY is not set. "
+                "ANTHROPIC_API_KEY is not set. "
                 "Set it as an environment variable in Render and redeploy."
             )
         _configured = True
@@ -78,7 +77,7 @@ def _parse_json_from_text(text: str) -> dict[str, Any]:
 
 
 def extract_product(image_bytes: bytes) -> dict[str, Any]:
-    """Call DeepSeek vision to extract product fields + bbox from a screenshot.
+    """Call Claude vision to extract product fields + bbox from a screenshot.
 
     Returns a dict with keys:
       name, price, original_price, discount_pct, description, rating, sold_count,
@@ -88,83 +87,54 @@ def extract_product(image_bytes: bytes) -> dict[str, Any]:
     _configure()
     
     # Get API key fresh at runtime
-    deepseek_api_key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-    if not deepseek_api_key:
+    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
         raise RuntimeError(
-            "DEEPSEEK_API_KEY is not set. "
+            "ANTHROPIC_API_KEY is not set. "
             "Set it as an environment variable in Render and redeploy."
         )
+    
+    client = anthropic.Anthropic(api_key=api_key)
     
     # Encode image to base64
     image_b64 = base64.b64encode(image_bytes).decode("utf-8")
     
-    # Prepare request for DeepSeek vision API (OpenAI-compatible format)
-    headers = {
-        "Authorization": f"Bearer {deepseek_api_key}",
-        "Content-Type": "application/json",
-    }
+    logger.info("Extracting product data from screenshot (Claude vision)")
     
-    payload = {
-        "model": DEEPSEEK_MODEL_VISION,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": EXTRACTION_PROMPT
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_b64}"
-                        }
-                    }
-                ]
-            }
-        ],
-        "temperature": 0.1,
-        "max_tokens": 1000,
-    }
-    
-    # Make API call with 30-second timeout
     try:
-        with httpx.Client(timeout=30) as client:
-            response = client.post(
-                f"{DEEPSEEK_API_BASE}/chat/completions",
-                json=payload,
-                headers=headers
-            )
-            response.raise_for_status()
-    except httpx.TimeoutException:
-        logger.error("DeepSeek API call timed out after 30 seconds")
-        raise TimeoutError("DeepSeek analysis took too long (>30s)")
-    except httpx.HTTPError as e:
-        # Log the full response for debugging
-        try:
-            error_body = e.response.text if hasattr(e, 'response') else str(e)
-        except:
-            error_body = str(e)
-        logger.error(f"DeepSeek API error: {e} — Response: {error_body}")
+        message = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=1000,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": image_b64,
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": EXTRACTION_PROMPT
+                        }
+                    ],
+                }
+            ],
+        )
+    except anthropic.APITimeoutError:
+        logger.error("Claude API call timed out after 30 seconds")
+        raise TimeoutError("Claude analysis took too long (>30s)")
+    except anthropic.APIError as e:
+        logger.error(f"Claude API error: {e}")
         raise
     
-    response_data = response.json()
-    
-    # Extract text from DeepSeek response (OpenAI-compatible format)
-    try:
-        if "choices" in response_data and len(response_data["choices"]) > 0:
-            text = response_data["choices"][0].get("message", {}).get("content", "")
-        else:
-            text = ""
-    except (KeyError, IndexError, TypeError):
-        logger.error(f"Unexpected DeepSeek response format: {response_data}")
-        raise ValueError("Invalid DeepSeek response format")
-    
-    if not text:
-        logger.error(f"DeepSeek returned empty response: {response_data}")
-        raise ValueError("DeepSeek returned no text content")
-    
+    text = message.content[0].text if message.content else ""
     data = _parse_json_from_text(text)
+    
     # Normalize types
     for num_field in ("price", "original_price", "discount_pct", "rating", "sold_count"):
         if data.get(num_field) is not None:
@@ -175,8 +145,9 @@ def extract_product(image_bytes: bytes) -> dict[str, Any]:
                     data[num_field] = float(data[num_field])
             except (TypeError, ValueError):
                 data[num_field] = None
+    
     logger.info(
-        "DeepSeek extracted: name=%s price=%s has_bbox=%s",
+        "Claude extracted: name=%s price=%s has_bbox=%s",
         data.get("name"),
         data.get("price"),
         data.get("product_image_bbox") is not None,

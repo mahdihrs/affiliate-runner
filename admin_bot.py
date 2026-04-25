@@ -40,7 +40,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from src import db, bot_storage
-from src.gemini_vision import extract_product, crop_to_bbox
+from src.claude_vision import extract_product, crop_to_bbox
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_USER_IDS = {

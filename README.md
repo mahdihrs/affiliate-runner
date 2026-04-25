@@ -1,19 +1,19 @@
 # racunjajan.online
 
-Fully automated Shopee affiliate content pipeline. Discovers products via Playwright, generates Bahasa Indonesia captions via Claude API, and publishes to Threads 6x/day across 4 niches.
+Fully automated Shopee affiliate content pipeline. Discovers products via Playwright, generates Bahasa Indonesia captions via DeepSeek API (with Claude fallback), processes images via Claude Haiku, and publishes to Threads 6x/day across 4 niches.
 
 ## How it works
 
 1. **Fetch** — Playwright scrapes Shopee using 4 strategies (flash sale → category → keyword → popular)
 2. **Filter** — Deduplicate against seen products, apply quality thresholds (rating ≥ 4.5, sold ≥ 100)
 3. **Score** — Rank by weighted formula: sold_count (40%), rating (30%), discount (20%), recency (10%)
-4. **Caption** — Claude Haiku generates Bahasa Indonesia caption with adlib selection and self-validation
+4. **Caption** — DeepSeek Chat generates Bahasa Indonesia caption with adlib selection and self-validation (Claude fallback available)
 5. **Post** — Publish to Threads via Meta Graph API with affiliate tracking link
 6. **Retry** — Failed posts are retried 15 min later; daily verification fills any remaining gaps
 
 ## Tech stack
 
-- **Python 3.11** — Playwright, Claude API, Threads API, Supabase, APScheduler
+- **Python 3.11** — Playwright, DeepSeek API, Claude API, Threads API, Supabase, APScheduler
 - **Supabase** — PostgreSQL database + ephemeral image storage
 - **Railway** — Docker deployment (single service, no separate worker)
 - **Telegram** — Logging and alerts
@@ -25,10 +25,10 @@ Fully automated Shopee affiliate content pipeline. Discovers products via Playwr
 │   ├── fetcher.py        # Playwright product discovery (4-strategy fallback)
 │   ├── filter.py         # 2-query dedup + quality filter
 │   ├── affiliate.py      # Affiliate link constructor (an_redir format)
-│   ├── caption.py        # Claude caption generator with adlib validation
+│   ├── caption.py        # DeepSeek caption generator with Claude fallback
 │   ├── images.py         # Ephemeral post-time image handler (temp-images bucket)
 │   ├── bot_storage.py    # Persistent bot-uploads bucket helpers
-│   ├── gemini_vision.py  # Gemini screenshot → product JSON + crop bbox
+│   ├── claude_vision.py  # Claude screenshot → product JSON + crop bbox
 │   ├── poster.py         # Threads API poster (single + carousel)
 │   ├── pipeline.py       # Main orchestration (fetch → filter → queue → post)
 │   ├── scheduler.py      # APScheduler — 4 jobs wired together
@@ -68,8 +68,10 @@ Required variables:
 
 | Variable | Description |
 |---|---|
-| `ANTHROPIC_API_KEY` | Claude API key (captions) |
-| `GEMINI_API_KEY` | Gemini API key (admin bot vision extraction) |
+| `ANTHROPIC_API_KEY` | Claude API key (image processing and optional captions) |
+| `DEEPSEEK_API_KEY` | DeepSeek API key (captions and optional vision) |
+| `USE_DEEPSEEK_CAPTION` | Set to `true` to use DeepSeek for captions (default: `false`) |
+| `CLAUDE_VISION_MODEL` | Claude model for vision (default: `claude-haiku-4-5-20251001`) |
 | `SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_KEY` | Supabase service role key |
 | `SUPABASE_BUCKET_NAME` | Ephemeral post-time bucket (default: `temp-images`) |
@@ -122,7 +124,7 @@ Deploy as **two services from the same repo** — they share the Dockerfile and 
 
 **Service 2: admin bot**
 - Start command: `python admin_bot.py`
-- Needs (minimum): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, `GEMINI_API_KEY`, all `SUPABASE_*` vars
+- Needs (minimum): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_IDS`, `ANTHROPIC_API_KEY`, all `SUPABASE_*` vars
 - Before setting `TELEGRAM_ALLOWED_USER_IDS`: deploy once with it empty, send `/whoami` to the bot, copy your user_id, then set the env var.
 
 The Dockerfile uses `mcr.microsoft.com/playwright/python` which includes Chromium — no additional browser install needed in production.
@@ -141,7 +143,7 @@ Run via `python admin_bot.py` (or the second Railway service).
 
 1. Open your Telegram bot and send `/start` to see the command menu.
 2. Run `/submit` — the bot asks for a screenshot.
-3. Send a screenshot of a Shopee product. Gemini extracts fields and the bot shows you what it parsed. If anything mandatory is missing (`name`, `price`, `description`), reply with `field: value` — one per line.
+3. Send a screenshot of a Shopee product. Claude extracts fields and the bot shows you what it parsed. If anything mandatory is missing (`name`, `price`, `description`), reply with `field: value` — one per line.
 4. Paste the affiliate link when asked.
 5. Pick a niche via the inline keyboard.
 6. Confirm → the product is inserted into `post_queue` for every active account and the scheduler picks it up on the next slot.

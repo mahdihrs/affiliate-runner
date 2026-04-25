@@ -16,16 +16,12 @@ logger = logging.getLogger(__name__)
 # Provider selection
 USE_DEEPSEEK = os.getenv("USE_DEEPSEEK_CAPTION", "false").lower() in ("true", "1", "yes")
 
-# Import the appropriate generator
-if USE_DEEPSEEK:
-    from src.deepseek_caption import generate_caption as _generate_caption_impl
-    logger.info("Caption provider: DeepSeek Chat")
-else:
-    import anthropic
-    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-    MODEL = "claude-haiku-4-5-20251001"
-    _generate_caption_impl = None  # Will use Claude implementation below
-    logger.info("Caption provider: Claude Haiku")
+# Import required modules
+import anthropic
+from src.deepseek_caption import generate_caption as _generate_caption_impl
+
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+MODEL = "claude-haiku-4-5-20251001"
 
 MAX_CAPTION_LENGTH = 500
 
@@ -132,11 +128,26 @@ async def generate_caption(
 ) -> str:
     """Generate a caption using the configured provider (Claude or DeepSeek).
 
+    If DeepSeek is enabled but fails, falls back to Claude.
     Returns the final caption string.
     """
     if USE_DEEPSEEK:
-        # DeepSeek implementation is async
-        return await _generate_caption_impl(product, niche, adlibs, affiliate_url)
+        try:
+            # Try DeepSeek first
+            return await _generate_caption_impl(product, niche, adlibs, affiliate_url)
+        except Exception as e:
+            logger.warning(f"DeepSeek caption generation failed: {e}, falling back to Claude")
+            # Fall back to Claude
+            import asyncio
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None,
+                _generate_caption_claude,
+                product,
+                niche,
+                adlibs,
+                affiliate_url
+            )
     else:
         # Claude is sync, but we're in an async context
         # Run it in a thread pool to avoid blocking

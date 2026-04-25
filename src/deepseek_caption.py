@@ -110,22 +110,23 @@ async def generate_caption(
             {"role": "user", "content": user_prompt}
         ],
         "temperature": 0.7,
-        "max_tokens": 500,
+        "max_tokens": 1000,  # Increased from 500 to allow completion
     }
 
     try:
-        with httpx.Client(timeout=30) as client:
-            response = client.post(
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
                 f"{DEEPSEEK_API_BASE}/chat/completions",
                 json=payload,
                 headers=headers
             )
             response.raise_for_status()
+            logger.info(f"DeepSeek API call successful, status: {response.status_code}")
     except httpx.TimeoutException:
         logger.error("DeepSeek caption API call timed out after 30 seconds")
         raise TimeoutError("DeepSeek caption generation took too long (>30s)")
     except httpx.HTTPError as e:
-        logger.error(f"DeepSeek API error: {e}")
+        logger.error(f"DeepSeek API error: {e}, response: {e.response.text if e.response else 'no response'}")
         raise
 
     response_data = response.json()
@@ -140,9 +141,10 @@ async def generate_caption(
         logger.error(f"Unexpected DeepSeek response format: {response_data}")
         raise ValueError("Invalid DeepSeek response format")
 
+
     if not caption:
         logger.error(f"DeepSeek returned empty response: {response_data}")
-        raise ValueError("DeepSeek returned no content")
+        raise ValueError(f"DeepSeek returned no content. Response: {response_data}")
 
     caption = caption.strip()
 

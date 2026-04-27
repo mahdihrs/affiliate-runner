@@ -150,12 +150,14 @@ async def _retry_job() -> None:
                 niche = db.get_niche_by_name(entry.get("niche_slug", ""))
                 adlibs = db.get_adlibs(entry["niche_id"]) if niche else []
 
-                caption = await generate_caption(
-                    product=product_data,
-                    niche=niche or {},
-                    adlibs=adlibs,
-                    affiliate_url=entry["affiliate_url"],
-                )
+                caption = (product_data.get("approved_caption") or "").strip()
+                if not caption:
+                    caption = await generate_caption(
+                        product=product_data,
+                        niche=niche or {},
+                        adlibs=adlibs,
+                        affiliate_url=entry["affiliate_url"],
+                    )
 
                 post_id = await post_with_image(
                     product=product_data,

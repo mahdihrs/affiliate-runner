@@ -1,7 +1,4 @@
-"""Caption generator with provider switching (Claude or DeepSeek).
-
-Uses Claude Haiku by default. Set USE_DEEPSEEK_CAPTION=true to use DeepSeek Chat instead.
-"""
+"""Caption generator locked to DeepSeek Chat provider."""
 
 import logging
 import os
@@ -17,11 +14,7 @@ logger = logging.getLogger(__name__)
 USE_DEEPSEEK = os.getenv("USE_DEEPSEEK_CAPTION", "false").lower() in ("true", "1", "yes")
 
 # Import required modules
-import anthropic
 from src.deepseek_caption import generate_caption as _generate_caption_impl
-
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-MODEL = "claude-haiku-4-5-20251001"
 
 MAX_CAPTION_LENGTH = 500
 
@@ -33,6 +26,8 @@ ATURAN KETAT:
 - Hanya gunakan klaim yang didukung oleh deskripsi produk seller
 - Jika adlib tidak relevan dengan produk, jangan gunakan
 - Jangan tambahkan manfaat yang tidak disebutkan seller
+- Boleh pakai emosi ringan (excited/lega/nyaman), tapi tetap faktual dan tidak overclaim
+- Jangan bikin klaim absolut, clickbait berlebihan, atau urgensi palsu
 - Kalau deskripsi produk minim, fokus ke harga dan spesifikasi saja
 - Tulis dalam Bahasa Indonesia yang casual dan relatable
 - Gunakan emoji secukupnya (maks 3)
@@ -83,81 +78,16 @@ Tugas:
 Link affiliate: {affiliate_url}"""
 
 
-def _generate_caption_claude(
-    product: dict[str, Any],
-    niche: dict[str, Any],
-    adlibs: list[dict[str, Any]],
-    affiliate_url: str,
-) -> str:
-    """Generate caption using Claude Haiku (sync version)."""
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    user_prompt = _build_user_prompt(product, niche, adlibs, affiliate_url)
-
-    logger.info(f"Generating caption for: {product.get('name', 'unknown')} (Claude)")
-
-    message = client.messages.create(
-        model=MODEL,
-        max_tokens=500,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-
-    caption = message.content[0].text.strip()
-
-    if len(caption) > MAX_CAPTION_LENGTH:
-        logger.warning(
-            f"Caption too long ({len(caption)} chars), truncating to {MAX_CAPTION_LENGTH}"
-        )
-        # Truncate at last newline before limit to keep structure clean
-        truncated = caption[:MAX_CAPTION_LENGTH]
-        last_newline = truncated.rfind("\n")
-        if last_newline > MAX_CAPTION_LENGTH * 0.6:
-            caption = truncated[:last_newline]
-        else:
-            caption = truncated
-
-    logger.info(f"Caption generated ({len(caption)} chars)")
-    return caption
-
-
 async def generate_caption(
     product: dict[str, Any],
     niche: dict[str, Any],
     adlibs: list[dict[str, Any]],
     affiliate_url: str,
 ) -> str:
-    """Generate a caption using the configured provider (Claude or DeepSeek).
-
-    If DeepSeek is enabled but fails, falls back to Claude.
-    Returns the final caption string.
-    """
-    if USE_DEEPSEEK:
-        try:
-            # Try DeepSeek first
-            return await _generate_caption_impl(product, niche, adlibs, affiliate_url)
-        except Exception as e:
-            logger.warning(f"DeepSeek caption generation failed: {e}, falling back to Claude")
-            # Fall back to Claude
-            import asyncio
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None,
-                _generate_caption_claude,
-                product,
-                niche,
-                adlibs,
-                affiliate_url
-            )
-    else:
-        # Claude is sync, but we're in an async context
-        # Run it in a thread pool to avoid blocking
-        import asyncio
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None,
-            _generate_caption_claude,
-            product,
-            niche,
-            adlibs,
-            affiliate_url
+    """Generate a caption using DeepSeek Chat only."""
+    if not USE_DEEPSEEK:
+        logger.warning(
+            "USE_DEEPSEEK_CAPTION is false, but caption provider is locked to DeepSeek. "
+            "Proceeding with DeepSeek generation."
         )
+    return await _generate_caption_impl(product, niche, adlibs, affiliate_url)

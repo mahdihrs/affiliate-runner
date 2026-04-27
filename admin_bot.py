@@ -5,7 +5,7 @@ Run as a second Railway service:  `python admin_bot.py`
 Flow:
   1. User runs /submit.
   2. Bot asks for a screenshot.
-  3. Gemini extracts fields (name, price, description, etc.) + bounding box.
+  3. Claude extracts fields (name, price, description, etc.) + bounding box.
   4. Cropped screenshot is uploaded to Supabase Storage (`bot-uploads` bucket).
   5. Bot asks for any missing mandatory fields (name, price, description).
   6. User pastes the affiliate link.
@@ -40,14 +40,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from src import db, bot_storage
-from src.claude_vision import extract_product, crop_to_bbox
+from src.caption import generate_caption
+from src.claude_vision import extract_product as extract_product_claude, crop_to_bbox
+from src.gemini_vision import extract_product as extract_product_gemini
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_USER_IDS = {
     int(x) for x in os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").split(",") if x.strip().isdigit()
 }
 
-AWAIT_PHOTO, ASK_MISSING, ASK_AFFILIATE, ASK_NICHE, CONFIRM = range(5)
+(
+    AWAIT_PHOTO,
+    ASK_MISSING,
+    ASK_KEYWORDS,
+    ASK_IMAGE_MODE,
+    AWAIT_OPTIONAL_IMAGE,
+    ASK_AFFILIATE,
+    ASK_NICHE,
+    ASK_CAPTION_MODE,
+    ASK_MANUAL_CAPTION,
+    REVIEW_CAPTION,
+    CONFIRM,
+) = range(11)
 
 MANDATORY_FIELDS = ("name", "price", "description")
 OPTIONAL_FIELDS = ("original_price", "discount_pct", "rating", "sold_count")
@@ -98,11 +112,44 @@ def _summary(data: dict[str, Any]) -> str:
         lines.append(f"<b>Affiliate:</b> {data['affiliate_url']}")
     if data.get("niche_name"):
         lines.append(f"<b>Niche:</b> {data['niche_name']}")
+    if data.get("seller_keywords"):
+        lines.append(f"<b>Keywords:</b> {', '.join(data['seller_keywords'])}")
+    if data.get("final_caption"):
+        lines.append(f"<b>Caption:</b> {data['final_caption']}")
     return "\n".join(lines)
 
 
 def _missing_mandatory(data: dict[str, Any]) -> list[str]:
     return [f for f in MANDATORY_FIELDS if data.get(f) in (None, "")]
+
+
+def _parse_keywords(text: str) -> list[str]:
+    chunks = text.replace(";", ",").split(",")
+    if len(chunks) == 1:
+        chunks = text.splitlines()
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for raw in chunks:
+        word = raw.strip().lower()
+        if not word:
+            continue
+        if word in seen:
+            continue
+        seen.add(word)
+        keywords.append(word)
+    return keywords
+
+
+def _keyword_quality_note(keywords: list[str]) -> str | None:
+    if len(keywords) < 3:
+        return (
+            "Tip: tambah 2-3 keyword yang lebih spesifik biar caption lebih kena "
+            "(contoh: bahan, ukuran, manfaat utama)."
+        )
+    very_short = sum(1 for k in keywords if len(k) <= 3)
+    if very_short >= len(keywords):
+        return "Tip: keyword masih terlalu umum. Tambahkan detail spesifik produk."
+    return None
 
 
 def _parse_field_lines(text: str) -> tuple[dict[str, Any], list[str]]:
@@ -185,21 +232,46 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     file = await photo.get_file()
     image_bytes = bytes(await file.download_as_bytearray())
 
-    # Gemini extraction — run in thread since the SDK is sync
-    # Add 35-second timeout (5s buffer above Gemini's 30s timeout)
+    # Primary: Gemini extraction with 20s timeout.
+    # Fallback: Claude extraction when Gemini times out/fails.
     try:
         extracted = await asyncio.wait_for(
-            asyncio.to_thread(extract_product, image_bytes),
-            timeout=35
+            asyncio.to_thread(extract_product_gemini, image_bytes),
+            timeout=20,
         )
+        logger.info("Image extraction provider: Gemini")
     except asyncio.TimeoutError:
-        logger.error("Gemini extraction timed out")
-        await msg.edit_text("Analysis took too long. Try with a clearer screenshot or /cancel.")
-        return ConversationHandler.END
-    except Exception as e:
-        logger.exception("Gemini extraction failed")
-        await msg.edit_text(f"Failed to analyze image: {e}\nSend another screenshot or /cancel.")
-        return ConversationHandler.END
+        logger.warning("Gemini extraction timed out (>20s), falling back to Claude")
+        try:
+            extracted = await asyncio.wait_for(
+                asyncio.to_thread(extract_product_claude, image_bytes),
+                timeout=35,
+            )
+            logger.info("Image extraction provider: Claude (fallback after Gemini timeout)")
+        except asyncio.TimeoutError:
+            logger.error("Claude fallback extraction timed out")
+            await msg.edit_text("Analysis took too long. Try with a clearer screenshot or /cancel.")
+            return ConversationHandler.END
+        except Exception as e:
+            logger.exception("Claude fallback extraction failed")
+            await msg.edit_text(f"Failed to analyze image: {e}\nSend another screenshot or /cancel.")
+            return ConversationHandler.END
+    except Exception as gemini_error:
+        logger.warning("Gemini extraction failed (%s), falling back to Claude", gemini_error)
+        try:
+            extracted = await asyncio.wait_for(
+                asyncio.to_thread(extract_product_claude, image_bytes),
+                timeout=35,
+            )
+            logger.info("Image extraction provider: Claude (fallback after Gemini error)")
+        except asyncio.TimeoutError:
+            logger.error("Claude fallback extraction timed out")
+            await msg.edit_text("Analysis took too long. Try with a clearer screenshot or /cancel.")
+            return ConversationHandler.END
+        except Exception as e:
+            logger.exception("Claude fallback extraction failed")
+            await msg.edit_text(f"Failed to analyze image: {e}\nSend another screenshot or /cancel.")
+            return ConversationHandler.END
 
     bbox = extracted.pop("product_image_bbox", None)
 
@@ -241,10 +313,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     await msg.edit_text(
         _summary(context.user_data)
-        + "\n\nNow paste the <b>affiliate link</b>.",
+        + "\n\nKirim <b>keywords seller description</b> (pisahkan koma / baris).",
         parse_mode="HTML",
     )
-    return ASK_AFFILIATE
+    return ASK_KEYWORDS
 
 
 async def handle_missing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -283,10 +355,112 @@ async def handle_missing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             (1 - context.user_data["price"] / context.user_data["original_price"]) * 100
         )
 
-    reply = _summary(context.user_data) + "\n\nNow paste the <b>affiliate link</b>."
+    reply = _summary(context.user_data) + "\n\nKirim <b>keywords seller description</b> (pisahkan koma / baris)."
     if notes:
         reply = "\n".join(notes) + "\n\n" + reply
     await update.message.reply_text(reply, parse_mode="HTML")
+    return ASK_KEYWORDS
+
+
+async def handle_keywords_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not _is_authorized(update):
+        return ConversationHandler.END
+    text = (update.message.text or "").strip()
+    keywords = _parse_keywords(text)
+    if not keywords:
+        await update.message.reply_text(
+            "Belum kebaca keyword-nya. Kirim lagi dalam format koma/baris."
+        )
+        return ASK_KEYWORDS
+
+    context.user_data["seller_keywords"] = keywords
+    note = _keyword_quality_note(keywords)
+    reply = f"Keywords tersimpan: {', '.join(keywords)}"
+    if note:
+        reply += f"\n\n{note}"
+    keyboard = [[
+        InlineKeyboardButton("Pakai image screenshot", callback_data="img:keep"),
+        InlineKeyboardButton("Upload image terpisah", callback_data="img:upload"),
+    ], [
+        InlineKeyboardButton("Tanpa image", callback_data="img:none"),
+    ]]
+    await update.message.reply_text(
+        reply + "\n\nPilih image untuk posting:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return ASK_IMAGE_MODE
+
+
+async def handle_keywords_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not _is_authorized(update):
+        return ConversationHandler.END
+    document = update.message.document
+    if not document:
+        return ASK_KEYWORDS
+    mime = document.mime_type or ""
+    if not mime.startswith("text/"):
+        await update.message.reply_text("Untuk upload keyword, kirim file teks (.txt).")
+        return ASK_KEYWORDS
+    file = await document.get_file()
+    content = bytes(await file.download_as_bytearray())
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        text = content.decode("latin-1", errors="ignore")
+    keywords = _parse_keywords(text)
+    if not keywords:
+        await update.message.reply_text("File keyword kosong/tidak valid. Coba kirim lagi.")
+        return ASK_KEYWORDS
+    context.user_data["seller_keywords"] = keywords
+    note = _keyword_quality_note(keywords)
+    reply = f"Keywords tersimpan: {', '.join(keywords)}"
+    if note:
+        reply += f"\n\n{note}"
+    keyboard = [[
+        InlineKeyboardButton("Pakai image screenshot", callback_data="img:keep"),
+        InlineKeyboardButton("Upload image terpisah", callback_data="img:upload"),
+    ], [
+        InlineKeyboardButton("Tanpa image", callback_data="img:none"),
+    ]]
+    await update.message.reply_text(
+        reply + "\n\nPilih image untuk posting:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return ASK_IMAGE_MODE
+
+
+async def handle_image_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    choice = query.data.split(":", 1)[1]
+    if choice == "upload":
+        await query.edit_message_text("Kirim image produk yang mau dipakai untuk posting.")
+        return AWAIT_OPTIONAL_IMAGE
+    if choice == "none":
+        await _cleanup_image(context)
+        context.user_data["image_url"] = ""
+        context.user_data["image_storage_path"] = ""
+    await query.edit_message_text("Sekarang paste <b>affiliate link</b>.", parse_mode="HTML")
+    return ASK_AFFILIATE
+
+
+async def handle_optional_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not _is_authorized(update):
+        return ConversationHandler.END
+    msg = await update.message.reply_text("Uploading image...")
+    photo = update.message.photo[-1]
+    file = await photo.get_file()
+    image_bytes = bytes(await file.download_as_bytearray())
+    try:
+        await _cleanup_image(context)
+        public_url, storage_path = await asyncio.to_thread(bot_storage.upload_bot_image, image_bytes)
+    except Exception as e:
+        logger.exception("Optional image upload failed")
+        await msg.edit_text(f"Gagal upload image: {e}. Kirim ulang foto atau /cancel.")
+        return AWAIT_OPTIONAL_IMAGE
+    context.user_data["image_url"] = public_url
+    context.user_data["image_storage_path"] = storage_path
+    await msg.edit_text("Image tersimpan. Sekarang paste <b>affiliate link</b>.", parse_mode="HTML")
     return ASK_AFFILIATE
 
 
@@ -338,6 +512,141 @@ async def handle_niche(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     context.user_data["niche_name"] = niche.get("display_name") or niche["name"]
 
     keyboard = [[
+        InlineKeyboardButton("Generate dengan AI", callback_data="capmode:ai"),
+        InlineKeyboardButton("Tulis manual", callback_data="capmode:manual"),
+    ], [InlineKeyboardButton("❌ Cancel", callback_data="cancel")]]
+    await query.edit_message_text(
+        _summary(context.user_data) + "\n\nPilih mode caption:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return ASK_CAPTION_MODE
+
+
+async def _generate_draft_caption(context: ContextTypes.DEFAULT_TYPE) -> str:
+    ud = context.user_data
+    niche = await asyncio.to_thread(db.get_niche_by_id, ud["niche_id"]) or {}
+    adlibs = await asyncio.to_thread(db.get_adlibs, ud["niche_id"])
+    product = {
+        "name": ud.get("name") or "",
+        "price": ud.get("price") or 0,
+        "original_price": ud.get("original_price") or ud.get("price") or 0,
+        "discount_pct": ud.get("discount_pct") or 0,
+        "rating": ud.get("rating") or 0,
+        "sold_count": ud.get("sold_count") or 0,
+        "description": ud.get("description") or "",
+    }
+    keywords = ud.get("seller_keywords") or []
+    if keywords:
+        product["description"] = (
+            f"{product['description']}\n\nKeyword seller: " + ", ".join(keywords)
+        ).strip()
+    return await generate_caption(
+        product=product,
+        niche=niche,
+        adlibs=adlibs,
+        affiliate_url=ud["affiliate_url"],
+    )
+
+
+def _caption_review_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Pakai caption ini", callback_data="cap:use"),
+            InlineKeyboardButton("✍️ Edit manual", callback_data="cap:edit"),
+        ],
+        [
+            InlineKeyboardButton("🔁 Re-generate AI", callback_data="cap:regen"),
+            InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
+        ],
+    ])
+
+
+async def handle_caption_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "cancel":
+        await _cleanup_image(context)
+        await query.edit_message_text("Cancelled. Nothing was queued.")
+        context.user_data.clear()
+        return ConversationHandler.END
+    mode = query.data.split(":", 1)[1]
+    if mode == "manual":
+        context.user_data["caption_mode"] = "manual"
+        await query.edit_message_text(
+            "Kirim caption manual kamu sekarang. Nanti masih bisa diedit lagi."
+        )
+        return ASK_MANUAL_CAPTION
+    context.user_data["caption_mode"] = "ai"
+    await query.edit_message_text("Generating caption AI...")
+    try:
+        caption = await _generate_draft_caption(context)
+    except Exception as e:
+        logger.exception("AI caption generation failed in admin_bot")
+        await query.edit_message_text(
+            f"Gagal generate caption: {e}\nPilih manual atau coba lagi.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("Tulis manual", callback_data="capmode:manual"),
+                InlineKeyboardButton("Coba AI lagi", callback_data="capmode:ai"),
+            ]]),
+        )
+        return ASK_CAPTION_MODE
+    context.user_data["generated_caption"] = caption
+    context.user_data["final_caption"] = caption
+    await query.edit_message_text(
+        f"<b>Draft caption AI:</b>\n\n{caption}",
+        parse_mode="HTML",
+        reply_markup=_caption_review_keyboard(),
+    )
+    return REVIEW_CAPTION
+
+
+async def handle_manual_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not _is_authorized(update):
+        return ConversationHandler.END
+    caption = (update.message.text or "").strip()
+    if not caption:
+        await update.message.reply_text("Caption kosong. Kirim caption manual yang valid.")
+        return ASK_MANUAL_CAPTION
+    context.user_data["edited_caption"] = caption
+    context.user_data["final_caption"] = caption
+    await update.message.reply_text(
+        f"<b>Draft caption:</b>\n\n{caption}",
+        parse_mode="HTML",
+        reply_markup=_caption_review_keyboard(),
+    )
+    return REVIEW_CAPTION
+
+
+async def handle_caption_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "cancel":
+        await _cleanup_image(context)
+        await query.edit_message_text("Cancelled. Nothing was queued.")
+        context.user_data.clear()
+        return ConversationHandler.END
+    action = query.data.split(":", 1)[1]
+    if action == "edit":
+        await query.edit_message_text("Kirim versi caption manual terbaru kamu.")
+        return ASK_MANUAL_CAPTION
+    if action == "regen":
+        await query.edit_message_text("Re-generating caption AI...")
+        try:
+            caption = await _generate_draft_caption(context)
+        except Exception as e:
+            logger.exception("AI caption re-generation failed in admin_bot")
+            await query.edit_message_text(f"Gagal regenerate: {e}", reply_markup=_caption_review_keyboard())
+            return REVIEW_CAPTION
+        context.user_data["generated_caption"] = caption
+        context.user_data["final_caption"] = caption
+        await query.edit_message_text(
+            f"<b>Draft caption AI:</b>\n\n{caption}",
+            parse_mode="HTML",
+            reply_markup=_caption_review_keyboard(),
+        )
+        return REVIEW_CAPTION
+    keyboard = [[
         InlineKeyboardButton("✅ Queue it", callback_data="confirm"),
         InlineKeyboardButton("❌ Cancel", callback_data="cancel"),
     ]]
@@ -372,6 +681,9 @@ async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "item_id": "",
         "image_storage_path": ud.get("image_storage_path") or "",
         "source": "telegram_bot",
+        "seller_keywords": ud.get("seller_keywords") or [],
+        "approved_caption": ud.get("final_caption") or "",
+        "caption_source": "manual" if ud.get("edited_caption") else "ai",
     }
 
     try:
@@ -421,6 +733,11 @@ async def await_photo_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return AWAIT_PHOTO
 
 
+async def await_optional_image_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Saya lagi nunggu image. Kirim foto produk atau /cancel.")
+    return AWAIT_OPTIONAL_IMAGE
+
+
 async def _set_commands(app: Application) -> None:
     """Register the command menu so /submit etc. appear above the Telegram keyboard."""
     await app.bot.set_my_commands([
@@ -450,8 +767,20 @@ def build_application() -> Application:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, await_photo_text),
             ],
             ASK_MISSING: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_missing)],
+            ASK_KEYWORDS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keywords_text),
+                MessageHandler(filters.Document.ALL, handle_keywords_document),
+            ],
+            ASK_IMAGE_MODE: [CallbackQueryHandler(handle_image_mode, pattern=r"^img:")],
+            AWAIT_OPTIONAL_IMAGE: [
+                MessageHandler(filters.PHOTO, handle_optional_image),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, await_optional_image_text),
+            ],
             ASK_AFFILIATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_affiliate)],
             ASK_NICHE: [CallbackQueryHandler(handle_niche, pattern=r"^niche:")],
+            ASK_CAPTION_MODE: [CallbackQueryHandler(handle_caption_mode, pattern=r"^(capmode:.*|cancel)$")],
+            ASK_MANUAL_CAPTION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_manual_caption)],
+            REVIEW_CAPTION: [CallbackQueryHandler(handle_caption_review, pattern=r"^(cap:.*|cancel)$")],
             CONFIRM: [CallbackQueryHandler(handle_confirm, pattern=r"^(confirm|cancel)$")],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],

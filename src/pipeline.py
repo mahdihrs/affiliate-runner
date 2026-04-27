@@ -46,13 +46,15 @@ async def process_and_post(
     adlibs = db.get_adlibs(entry_niche_id)
 
     try:
-        # Generate caption
-        caption = await generate_caption(
-            product=product_data,
-            niche=niche,
-            adlibs=adlibs,
-            affiliate_url=affiliate_url,
-        )
+        # Use pre-approved caption from Telegram flow when available.
+        caption = (product_data.get("approved_caption") or "").strip()
+        if not caption:
+            caption = await generate_caption(
+                product=product_data,
+                niche=niche,
+                adlibs=adlibs,
+                affiliate_url=affiliate_url,
+            )
 
         # Post to Threads with image
         post_id = await post_with_image(

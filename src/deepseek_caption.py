@@ -25,6 +25,8 @@ ATURAN KETAT:
 - Hanya gunakan klaim yang didukung oleh deskripsi produk seller
 - Jika adlib tidak relevan dengan produk, jangan gunakan
 - Jangan tambahkan manfaat yang tidak disebutkan seller
+- Boleh pakai emosi ringan (excited/lega/nyaman), tapi tetap faktual dan tidak overclaim
+- Jangan bikin klaim absolut, clickbait berlebihan, atau urgensi palsu
 - Kalau deskripsi produk minim, fokus ke harga dan spesifikasi saja
 - Tulis dalam Bahasa Indonesia yang casual dan relatable
 - Gunakan emoji secukupnya (maks 3)

@@ -166,7 +166,7 @@ def insert_post_log(log: dict[str, Any]) -> None:
 
 
 def count_today_posts(account_id: str) -> int:
-    """Count successful posts for an account today."""
+    """Count successful posts (including reposts) for an account today."""
     today_start = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     ).isoformat()
@@ -175,7 +175,7 @@ def count_today_posts(account_id: str) -> int:
         .table("post_logs")
         .select("id", count="exact")
         .eq("account_id", account_id)
-        .eq("status", "success")
+        .in_("status", ["success", "reposted"])
         .gte("posted_at", today_start)
         .execute()
     )
@@ -246,6 +246,48 @@ def insert_bot_queue_entries(
     ]
     get_client().table("post_queue").insert(rows).execute()
     return len(rows)
+
+
+def get_repostable_entries(account_id: str, limit: int = 1) -> list[dict[str, Any]]:
+    """Fetch previously posted queue entries that can be reposted (text-only).
+
+    Returns oldest posted entries first (round-robin reposting).
+    Excludes entries already reposted today.
+    """
+    today_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ).isoformat()
+
+    # Get today's already-reposted affiliate URLs to avoid duplicates
+    today_reposts = (
+        get_client()
+        .table("post_logs")
+        .select("affiliate_url")
+        .eq("account_id", account_id)
+        .eq("status", "reposted")
+        .gte("posted_at", today_start)
+        .execute()
+    )
+    reposted_urls = {r["affiliate_url"] for r in today_reposts.data}
+
+    # Get posted queue entries ordered by oldest first
+    result = (
+        get_client()
+        .table("post_queue")
+        .select("*")
+        .eq("account_id", account_id)
+        .eq("status", "posted")
+        .order("posted_at", desc=False)
+        .limit(50)
+        .execute()
+    )
+
+    # Filter out already-reposted-today
+    candidates = [
+        r for r in result.data
+        if r.get("affiliate_url") and r["affiliate_url"] not in reposted_urls
+    ]
+    return candidates[:limit]
 
 
 def get_active_bot_image_paths() -> set[str]:
